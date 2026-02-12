@@ -43,7 +43,7 @@ class StreamingTTSService:
         self,
         model_path: str,
         device: str = "cuda",
-        inference_steps: int = 5,
+        inference_steps: int = 20,
     ) -> None:
         # Keep model_path as string for HuggingFace repo IDs (Path() converts / to \ on Windows)
         self.model_path = model_path
@@ -234,7 +234,7 @@ class StreamingTTSService:
     def stream(
         self,
         text: str,
-        cfg_scale: float = 1.5,
+        cfg_scale: float = 1.3,
         do_sample: bool = False,
         temperature: float = 0.9,
         top_p: float = 0.9,
@@ -370,11 +370,11 @@ async def websocket_stream(ws: WebSocket) -> None:
     voice_param = ws.query_params.get("voice")
 
     try:
-        cfg_scale = float(cfg_param) if cfg_param is not None else 1.5
+        cfg_scale = float(cfg_param) if cfg_param is not None else 1.3
     except ValueError:
-        cfg_scale = 1.5
+        cfg_scale = 1.3
     if cfg_scale <= 0:
-        cfg_scale = 1.5
+        cfg_scale = 1.3
     try:
         inference_steps = int(steps_param) if steps_param is not None else None
         if inference_steps is not None and inference_steps <= 0:
@@ -512,4 +512,3 @@ def get_config():
         "voices": voices,
         "default_voice": service.default_voice_key,
     }
-

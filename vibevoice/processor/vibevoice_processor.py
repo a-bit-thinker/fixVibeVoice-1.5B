@@ -93,8 +93,10 @@ class VibeVoiceProcessor:
         speech_tok_compress_ratio = config.get("speech_tok_compress_ratio", 3200)
         db_normalize = config.get("db_normalize", True)
         
-        # Load tokenizer - try from model path first, then fallback to Qwen        
-        language_model_pretrained_name = config.get("language_model_pretrained_name", None) or kwargs.pop("language_model_pretrained_name", "Qwen/Qwen2.5-1.5B")
+        # Load tokenizer: explicit override should win over config so offline local paths work.
+        language_model_pretrained_name = kwargs.pop("language_model_pretrained_name", None) or config.get(
+            "language_model_pretrained_name", "Qwen/Qwen2.5-1.5B"
+        )
         logger.info(f"Loading tokenizer from {language_model_pretrained_name}")
         if 'qwen' in language_model_pretrained_name.lower():
             tokenizer = VibeVoiceTextTokenizerFast.from_pretrained(

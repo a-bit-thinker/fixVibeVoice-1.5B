@@ -171,6 +171,11 @@ tags
 # our proj
 /output/
 /outputs/
+/outputs_debug/
+/outputs_smoke/
+/logs/
+/runtime/numba_cache/
+/runtime/pylibs/
 /checkpoint/
 /checkpoints/
 exp
