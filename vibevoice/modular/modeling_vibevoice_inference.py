@@ -410,6 +410,12 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
         parsed_scripts = kwargs.pop("parsed_scripts", None)
         all_speakers_list = kwargs.pop("all_speakers_list", None)
         max_length_times = kwargs.pop("max_length_times", 2)
+        progress_text_tokens = kwargs.pop("progress_text_tokens", None)
+        progress_voice_tokens = kwargs.pop("progress_voice_tokens", None)
+        if progress_text_tokens is not None:
+            progress_text_tokens = int(progress_text_tokens)
+        if progress_voice_tokens is not None:
+            progress_voice_tokens = int(progress_voice_tokens)
 
         if kwargs.get('max_new_tokens', None) is None:
             kwargs['max_new_tokens'] = self.config.decoder_config.max_position_embeddings - kwargs['input_ids'].shape[-1]
@@ -478,14 +484,19 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
         max_step_per_sample = torch.min(generation_config.max_length - initial_length_per_sample, (max_length_times * initial_length_per_sample).long())
         reach_max_step_sample = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
-        # Create progress iterator if verbose
+        # Create a manual progress reporter. We avoid a fixed prompt-length denominator
+        # because long voice prompts make x/y look misleading for short text inputs.
         if kwargs.get("show_progress_bar", True):
             tqdm_fn = tqdm_class if tqdm_class is not None else tqdm
-            progress_bar = tqdm_fn(range(max_steps), desc="Generating", leave=False)
+            progress_bar = tqdm_fn(desc="Generating", leave=False)
+            text_est_steps = None
+            if progress_text_tokens is not None:
+                text_est_steps = max(1, int(max_length_times * max(progress_text_tokens, 1)))
         else:
-            progress_bar = range(max_steps)
+            progress_bar = None
+            text_est_steps = None
         
-        for step in progress_bar:
+        for step in range(max_steps):
             # Check for external stop signal
             if stop_check_fn is not None and stop_check_fn():
                 if verbose:
@@ -501,9 +512,12 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
                     if verbose:
                         print(f"Audio generation stopped externally at step {step + 1}")
                     break
+
+            if progress_bar is not None:
+                progress_bar.update(1)
             
             if finished_tags.all():
-                if hasattr(progress_bar, 'set_description'):
+                if progress_bar is not None:
                     progress_bar.set_description("Generation complete")
                 break
 
@@ -514,10 +528,24 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
                     reach_max_step_sample[reached_samples] = True
                 break
             
-            # Update progress bar description with active samples
-            if hasattr(progress_bar, 'set_description'):
+            # Update progress description with clearer, text-based context.
+            if progress_bar is not None:
                 active_samples = (~finished_tags).sum().item()
-                progress_bar.set_description(f"Generating (active: {active_samples}/{batch_size})")
+                if text_est_steps is not None:
+                    step_display = min(step + 1, text_est_steps)
+                    if progress_voice_tokens is not None:
+                        progress_bar.set_description(
+                            "Generating "
+                            f"(active: {active_samples}/{batch_size}, step: {step_display}/{text_est_steps}, "
+                            f"voice_prompt_tokens: {max(progress_voice_tokens, 0)})"
+                        )
+                    else:
+                        progress_bar.set_description(
+                            "Generating "
+                            f"(active: {active_samples}/{batch_size}, step: {step_display}/{text_est_steps})"
+                        )
+                else:
+                    progress_bar.set_description(f"Generating (active: {active_samples}/{batch_size}, step: {step + 1})")
 
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
             if is_prefill:
@@ -733,6 +761,9 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
             
             # Set inputs_embeds for next iteration
             inputs_embeds = next_inputs_embeds
+
+        if progress_bar is not None:
+            progress_bar.close()
 
         if audio_streamer is not None:
             audio_streamer.end()

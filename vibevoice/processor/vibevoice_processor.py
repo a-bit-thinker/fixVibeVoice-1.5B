@@ -38,7 +38,12 @@ class VibeVoiceProcessor:
         self.speech_tok_compress_ratio = speech_tok_compress_ratio
         self.db_normalize = db_normalize
         self.audio_normalizer = AudioNormalizer() if db_normalize else None
-        self.system_prompt = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.\n"
+        self.system_prompt = (
+            " Transform the text into clean speech output from a single speaker, "
+            "using one consistent voice style for the entire output.\n"
+            " Output dry speech only: no background music, no intro or outro jingle, "
+            "no singing, no humming, no ambient sounds, and no sound effects.\n"
+        )
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
@@ -268,7 +273,8 @@ class VibeVoiceProcessor:
         
         # Parse the script
         parsed_lines = self._parse_script(script)
-        all_speakers = list(set(speaker_id for speaker_id, _ in parsed_lines))
+        # Preserve first-appearance order so speaker-to-voice mapping is stable.
+        all_speakers = list(dict.fromkeys(speaker_id for speaker_id, _ in parsed_lines))
         
         # Create system prompt
         # system_tokens = self.tokenizer.encode(self.system_prompt, add_special_tokens=False)

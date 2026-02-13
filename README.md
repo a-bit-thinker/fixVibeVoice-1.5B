@@ -1,200 +1,179 @@
-<div align="center">
+# VibeVoice LAN Shell (Fork)
 
-## 🎙️ VibeVoice: Open-Source Frontier Voice AI
-[![Project Page](https://img.shields.io/badge/Project-Page-blue?logo=githubpages)](https://microsoft.github.io/VibeVoice)
-[![Hugging Face](https://img.shields.io/badge/HuggingFace-Collection-orange?logo=huggingface)](https://huggingface.co/collections/microsoft/vibevoice-68a2ef24a875c44be47b034f)
-[![TTS Report](https://img.shields.io/badge/TTS-Report-red?logo=arxiv)](https://arxiv.org/pdf/2508.19205)
-[![ASR Report](https://img.shields.io/badge/ASR-Report-yellow?logo=arxiv)](https://arxiv.org/pdf/2601.18184)
-[![Colab](https://img.shields.io/badge/StreamingTTS-Colab-green?logo=googlecolab)](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/VibeVoice_colab.ipynb)
-[![ASR Playground](https://img.shields.io/badge/ASR-Playground-6F42C1?logo=gradio)](https://aka.ms/vibevoice-asr)
+GitHub-ready fork of Microsoft VibeVoice focused on practical local/LAN TTS usage with a stable WebUI workflow.
 
-</div>
+Current release: `v0.2.0`
 
+## Upstream
 
-<div align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="Figures/VibeVoice_logo_white.png">
-  <img src="Figures/VibeVoice_logo.png" alt="VibeVoice Logo" width="300">
-</picture>
-</div>
+- Upstream project: https://github.com/microsoft/VibeVoice
+- This fork keeps upstream core model code and adds deployment/debug improvements for local server use.
 
-<div align="left">
+## What This Fork Adds
 
-<h3>📰 News</h3>
+- `run_lan.sh` launcher with versioned logs and `latest.log` symlink.
+- Local tokenizer/model loading defaults for offline or semi-offline workflows.
+- More robust uploaded audio loading path (browser recordings included).
+- Voice clone upload panel in WebUI.
+- Single-speaker, dry-speech prompting (less random music/sound effects).
+- Generation thread isolation/cleanup for repeated WebUI runs.
+- Voice conditioning cap for long uploaded clone samples to reduce sample-content leakage.
+- Clearer progress accounting (`text_tokens` + `voice_prompt_tokens`) in logs.
 
-<strong>2026-01-21: 📣 We open-sourced <a href="docs/vibevoice-asr.md"><strong>VibeVoice-ASR</strong></a>, a unified speech-to-text model designed to handle 60-minute long-form audio in a single pass, generating structured transcriptions containing Who (Speaker), When (Timestamps), and What (Content), with support for User-Customized Context. Try it in [Playground](https://aka.ms/vibevoice-asr)</strong>. 
-- ⭐️ VibeVoice-ASR is natively multilingual, supporting over 50 languages — check the [supported languages](docs/vibevoice-asr.md#language-distribution) for details.
-- 🔥 The VibeVoice-ASR [finetuning code](finetuning-asr/README.md) is now available!
-- ⚡️ **vLLM inference** is now supported for faster inference; see [vllm-asr](docs/vibevoice-vllm-asr.md) for more details.
-- 📑 [VibeVoice-ASR Technique Report](https://arxiv.org/pdf/2601.18184) is available.
+## Tested Environment
 
-2025-12-16: 📣 We added experimental speakers to <a href="docs/vibevoice-realtime-0.5b.md"><strong>VibeVoice‑Realtime‑0.5B</strong></a> for exploration, including multilingual voices in nine languages (DE, FR, IT, JP, KR, NL, PL, PT, ES) and 11 distinct English style voices. [Try it](docs/vibevoice-realtime-0.5b.md#optional-more-experimental-voices). More speaker types will be added over time.
+- Ubuntu 22.04+
+- Python 3.10
+- NVIDIA GPU (CUDA)
+- Virtualenv (example: `/root/fish-venv-cu126`)
 
-2025-12-03: 📣 We open-sourced <a href="docs/vibevoice-realtime-0.5b.md"><strong>VibeVoice‑Realtime‑0.5B</strong></a>, a real‑time text‑to‑speech model that supports streaming text input and robust long-form speech generation. Try it on [Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/vibevoice_realtime_colab.ipynb).
+## Quick Start
 
+### 1) Clone and install
 
-2025-09-05: VibeVoice is an open-source research framework intended to advance collaboration in the speech synthesis community. After release, we discovered instances where the tool was used in ways inconsistent with the stated intent. Since responsible use of AI is one of Microsoft’s guiding principles, we have removed the VibeVoice-TTS code from this repository.
+```bash
+cd /root/fish-speech
+git clone https://github.com/<your-user>/VibeVoice.git
+cd VibeVoice
 
+python3 -m venv /root/fish-venv-cu126
+source /root/fish-venv-cu126/bin/activate
 
-2025-08-25: 📣 We open-sourced <a href="docs/vibevoice-tts.md"><strong>VibeVoice-TTS</strong></a>, a long-form multi-speaker text-to-speech model that can synthesize speech up to 90 minutes long with up to 4 distinct speakers.
+pip install --upgrade pip
+pip install -e .
+```
 
-</div>
+### 2) Download checkpoints
 
-## Overview
+```bash
+source /root/fish-venv-cu126/bin/activate
+cd /root/fish-speech/VibeVoice
 
-VibeVoice is a **family of open-source frontier voice AI models** that includes both Text-to-Speech (TTS) and Automatic Speech Recognition (ASR) models. 
+# Main TTS model
+hf download microsoft/VibeVoice-1.5B --local-dir checkpoints/VibeVoice-1.5B
 
-A core innovation of VibeVoice is its use of continuous speech tokenizers (Acoustic and Semantic) operating at an ultra-low frame rate of **7.5 Hz**. These tokenizers efficiently preserve audio fidelity while significantly boosting computational efficiency for processing long sequences. VibeVoice employs a [next-token diffusion](https://arxiv.org/abs/2412.08635) framework, leveraging a Large Language Model (LLM) to understand textual context and dialogue flow, and a diffusion head to generate high-fidelity acoustic details.
+# Tokenizer used by this setup
+hf download Qwen/Qwen2.5-1.5B --local-dir checkpoints/Qwen2.5-1.5B-tokenizer
+```
 
-For more information, demos, and examples, please visit our [Project Page](https://microsoft.github.io/VibeVoice).
+If `hf` asks for login:
 
+```bash
+hf auth login
+```
 
-<div align="center">
+Use a valid Hugging Face token from https://huggingface.co/settings/tokens
 
-| Model |   Weight | Quick Try |
-|-------|--------------|---------|
-| VibeVoice-ASR-7B | [HF Link](https://huggingface.co/microsoft/VibeVoice-ASR) |  [Playground](https://aka.ms/vibevoice-asr) |
-| VibeVoice-TTS-1.5B | [HF Link](https://huggingface.co/microsoft/VibeVoice-1.5B) | Disabled |
-| VibeVoice-Realtime-0.5B | [HF Link](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) | [Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/vibevoice_realtime_colab.ipynb) |
+### 3) Launch WebUI on LAN
 
-</div>
+```bash
+cd /root/fish-speech/VibeVoice
+source /root/fish-venv-cu126/bin/activate
 
-## Models
+HOST=0.0.0.0 PORT=7861 ./run_lan.sh
+```
 
+Open from another device on same network:
 
-### 1. 📖 [VibeVoice-ASR](docs/vibevoice-asr.md) - Long-form Speech Recognition
+```text
+http://<server-lan-ip>:7861
+```
 
-**VibeVoice-ASR** is a unified speech-to-text model designed to handle **60-minute long-form audio** in a single pass, generating structured transcriptions containing **Who (Speaker), When (Timestamps), and What (Content)**, with support for **Customized Hotwords**.
+## Runtime Controls
 
-- **🕒 60-minute Single-Pass Processing**:
-  Unlike conventional ASR models that slice audio into short chunks (often losing global context), VibeVoice ASR accepts up to **60 minutes** of continuous audio input within 64K token length. This ensures consistent speaker tracking and semantic coherence across the entire hour.
+`run_lan.sh` supports:
 
-- **👤 Customized Hotwords**:
-  Users can provide customized hotwords (e.g., specific names, technical terms, or background info) to guide the recognition process, significantly improving accuracy on domain-specific content.
+- `VENV_PATH` (default `/root/fish-venv-cu126`)
+- `MODEL_PATH` (default `checkpoints/VibeVoice-1.5B`)
+- `TOKENIZER_PATH` (default `checkpoints/Qwen2.5-1.5B-tokenizer`)
+- `HOST` (default `0.0.0.0`)
+- `PORT` (default `7861`)
+- `DEVICE` (default `cuda`)
+- `ALLOW_BGM_VOICES` (`0` or `1`)
+- `LOG_DIR` (default `logs`)
+- `LOG_KEEP` (default `20`)
 
-- **📝 Rich Transcription (Who, When, What)**:
-  The model jointly performs ASR, diarization, and timestamping, producing a structured output that indicates *who* said *what* and *when*.
+Example:
 
-[📖 Documentation](docs/vibevoice-asr.md) | [🤗 Hugging Face](https://huggingface.co/microsoft/VibeVoice-ASR) | [🎮 Playground](https://aka.ms/vibevoice-asr) | [🛠️ Finetuning](finetuning-asr/README.md) |  [📊 Paper](docs/VibeVoice-ASR-Report.pdf)
+```bash
+HOST=0.0.0.0 PORT=7861 DEVICE=cuda LOG_KEEP=50 ./run_lan.sh
+```
 
+## Voice Clone Behavior (Important)
 
-<p align="center">
-  <img src="Figures/DER.jpg" alt="DER" width="50%"><br>
-  <img src="Figures/cpWER.jpg" alt="cpWER" width="50%"><br>
-  <img src="Figures/tcpWER.jpg" alt="tcpWER" width="50%">
-</p>
+This fork intentionally caps long uploaded clone audio during conditioning to reduce the bug where sample speech content leaks into generated output.
 
+Defaults:
 
-<div align="center" id="vibevoice-asr">
+- `VIBEVOICE_MAX_CLONE_SECONDS=30`
+- `VIBEVOICE_CLONE_SEGMENTS=3`
 
-https://github.com/user-attachments/assets/acde5602-dc17-4314-9e3b-c630bc84aefa
+Tune if needed:
 
-</div>
-<br>
+```bash
+export VIBEVOICE_MAX_CLONE_SECONDS=40
+export VIBEVOICE_CLONE_SEGMENTS=4
+./run_lan.sh
+```
 
-### 2. 🎙️ [VibeVoice-TTS](docs/vibevoice-tts.md) - Long-form Multi-speaker TTS
+Guidance:
 
-**Best for**: Long-form conversational audio, podcasts, multi-speaker dialogues
+- Best naturalness usually comes from clean speech with one speaker.
+- Longer than ~30s can improve timbre stability but may increase style/content leakage.
+- If leakage appears, lower `VIBEVOICE_MAX_CLONE_SECONDS`.
 
-- **⏱️ 90-minute Long-form Generation**:
-  Synthesizes conversational/single-speaker speech up to **90 minutes** in a single pass, maintaining speaker consistency and semantic coherence throughout.
+## Troubleshooting
 
-- **👥 Multi-speaker Support**:
-  Supports up to **4 distinct speakers** in a single conversation, with natural turn-taking and speaker consistency across long dialogues.
+### Tokenizer load error
 
-- **🎭 Expressive Speech**:
-  Generates expressive, natural-sounding speech that captures conversational dynamics and emotional nuances.
+If you see `Can't load tokenizer for 'Qwen/Qwen2.5-1.5B'`, verify local path exists:
 
-- **🌐 Multi-lingual Support**:
-  Supports English, Chinese and other languages.
+```bash
+ls checkpoints/Qwen2.5-1.5B-tokenizer
+```
 
+And run with the correct path:
 
-[📖 Documentation](docs/vibevoice-tts.md) | [🤗 Hugging Face](https://huggingface.co/microsoft/VibeVoice-1.5B)  |  [📊 Paper](https://arxiv.org/pdf/2508.19205)
+```bash
+TOKENIZER_PATH=/root/fish-speech/VibeVoice/checkpoints/Qwen2.5-1.5B-tokenizer ./run_lan.sh
+```
 
+### `flash_attn` install failure
 
-<div align="center">
-  <img src="Figures/VibeVoice-TTS-results.jpg" alt="VibeVoice Results" width="80%">
-</div>
+`flash_attn` is optional. This fork falls back to SDPA automatically if unavailable.
 
+### Mobile cannot open page
 
-**English**
-<div align="center">
+Use HTTP on LAN (`http://...`). Local self-signed HTTPS often fails on mobile browsers.
 
-https://github.com/user-attachments/assets/0967027c-141e-4909-bec8-091558b1b784
+### Progress looks confusing
 
-</div>
+This fork logs progress basis in WebUI output:
 
+- `text_tokens`
+- `voice_prompt_tokens`
 
-**Chinese**
-<div align="center">
+This is clearer than raw prompt-length denominators for long clone prompts.
 
-https://github.com/user-attachments/assets/322280b7-3093-4c67-86e3-10be4746c88f
+## Release Notes
 
-</div>
+### v0.2.0
 
-**Cross-Lingual**
-<div align="center">
+- Fixed long clone sample leakage by adding conditioning cap and segment selection.
+- Improved generation progress accounting and log clarity.
+- Improved repeated-run stability with generation thread cleanup.
+- Kept LAN and logging workflow from `v0.1.0`.
 
-https://github.com/user-attachments/assets/838d8ad9-a201-4dde-bb45-8cd3f59ce722
+## Tag and Push to GitHub
 
-</div>
+```bash
+cd /root/fish-speech/VibeVoice
+git add VERSION README.md ROLLBACK.md demo/gradio_demo.py vibevoice/modular/modeling_vibevoice_inference.py vibevoice/processor/vibevoice_processor.py
+git commit -m "release: vibevoice shell v0.2.0"
+git tag -a v0.2.0 -m "VibeVoice LAN shell v0.2.0"
+git push origin main --tags
+```
 
-**Spontaneous Singing**
-<div align="center">
+## License
 
-https://github.com/user-attachments/assets/6f27a8a5-0c60-4f57-87f3-7dea2e11c730
-
-</div>
-
-
-**Long Conversation with 4 people**
-<div align="center">
-
-https://github.com/user-attachments/assets/a357c4b6-9768-495c-a576-1618f6275727
-
-</div>
-
-
-
-
-
-<br>
-
-### 3. ⚡ [VibeVoice-Streaming](docs/vibevoice-realtime-0.5b.md) - Real-time Streaming TTS
-
-VibeVoice-Realtime is a **lightweight real‑time** text-to-speech model supporting **streaming text input** and **robust long-form speech generation**.
-
-- Parameter size: 0.5B (deployment-friendly)
-- Real-time TTS (~300 milliseconds first audible latency)
-- Streaming text input
-- Robust long-form speech generation (~10 minutes)
-
-[📖 Documentation](docs/vibevoice-realtime-0.5b.md) | [🤗 Hugging Face](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) | [🚀 Colab](https://colab.research.google.com/github/microsoft/VibeVoice/blob/main/demo/vibevoice_realtime_colab.ipynb)
-
-
-<div align="center" id="generated-example-audio-vibevoice-realtime">
-
-https://github.com/user-attachments/assets/0901d274-f6ae-46ef-a0fd-3c4fba4f76dc
-
-</div>
-
-<br>
-
-## Contributing
-
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
-
-
-
-## ⚠️ Risks and Limitations
-
-
-While efforts have been made to optimize it through various techniques, it may still produce outputs that are unexpected, biased, or inaccurate. VibeVoice inherits any biases, errors, or omissions produced by its base model (specifically, Qwen2.5 1.5b in this release).
-Potential for Deepfakes and Disinformation: High-quality synthetic speech can be misused to create convincing fake audio content for impersonation, fraud, or spreading disinformation. Users must ensure transcripts are reliable, check content accuracy, and avoid using generated content in misleading ways. Users are expected to use the generated content and to deploy the models in a lawful manner, in full compliance with all applicable laws and regulations in the relevant jurisdictions. It is best practice to disclose the use of AI when sharing AI-generated content.
-
-
-We do not recommend using VibeVoice in commercial or real-world applications without further testing and development. This model is intended for research and development purposes only. Please use responsibly.
-
-## Star History
-
-![Star History Chart](https://api.star-history.com/svg?repos=Microsoft/vibevoice&type=date&legend=top-left)
+This repo remains under the upstream license (`LICENSE`). Review upstream policy and applicable laws before deploying voice generation systems.

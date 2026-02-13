@@ -72,10 +72,13 @@ class VibeVoiceDemo:
         self.tokenizer_path = tokenizer_path
         self.adapter_path = adapter_path
         self.exclude_bgm_voices = exclude_bgm_voices
+        self.max_clone_seconds = max(4.0, float(os.getenv("VIBEVOICE_MAX_CLONE_SECONDS", "30")))
+        self.clone_segments = max(1, int(os.getenv("VIBEVOICE_CLONE_SEGMENTS", "3")))
         self.loaded_adapter_root: Optional[str] = None
         self.is_generating = False  # Track generation state
         self.stop_generation = False  # Flag to stop generation
         self.current_streamer = None  # Track current audio streamer
+        self.current_generation_thread: Optional[threading.Thread] = None
         self.load_model()
         self.setup_voice_presets()
         self.load_example_scripts()  # Load example scripts
@@ -280,16 +283,124 @@ class VibeVoiceDemo:
     
     def read_audio(self, audio_path: str, target_sr: int = 24000) -> np.ndarray:
         """Read and preprocess audio file."""
-        try:
-            wav, sr = sf.read(audio_path)
-            if len(wav.shape) > 1:
+        path = Path(audio_path).expanduser()
+
+        def _finalize_audio(wav: np.ndarray, sr: int) -> np.ndarray:
+            wav = np.asarray(wav, dtype=np.float32)
+            if wav.ndim > 1:
                 wav = np.mean(wav, axis=1)
             if sr != target_sr:
                 wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
-            return wav
-        except Exception as e:
-            print(f"Error reading audio {audio_path}: {e}")
+            if wav.size == 0:
+                return np.array([])
+            if not np.isfinite(wav).all():
+                wav = np.nan_to_num(wav, nan=0.0, posinf=0.0, neginf=0.0)
+            peak = float(np.max(np.abs(wav))) if wav.size else 0.0
+            if peak > 1.0:
+                wav = wav / peak
+            return wav.astype(np.float32, copy=False)
+
+        if not path.is_file():
+            print(f"Error reading audio {audio_path}: file not found")
             return np.array([])
+
+        try:
+            if path.stat().st_size <= 0:
+                print(f"Error reading audio {audio_path}: file is empty")
+                return np.array([])
+        except Exception:
+            pass
+
+        # 1) Fast path: soundfile (handles normal wav/flac/ogg)
+        try:
+            wav, sr = sf.read(str(path), always_2d=False)
+            return _finalize_audio(wav, int(sr))
+        except Exception as sf_err:
+            # 2) Fallback: librosa/audioread (handles more browser recordings)
+            try:
+                wav, sr = librosa.load(str(path), sr=target_sr, mono=True)
+                return _finalize_audio(wav, int(sr))
+            except Exception as lb_err:
+                # 3) Fallback: pydub/ffmpeg for unusual containers masquerading as .wav
+                try:
+                    from pydub import AudioSegment
+
+                    segment = AudioSegment.from_file(str(path))
+                    samples = np.array(segment.get_array_of_samples(), dtype=np.float32)
+                    if segment.channels > 1:
+                        samples = samples.reshape((-1, segment.channels)).mean(axis=1)
+                    max_int = float(1 << (8 * segment.sample_width - 1))
+                    if max_int > 0:
+                        samples = samples / max_int
+                    return _finalize_audio(samples, int(segment.frame_rate))
+                except Exception as pd_err:
+                    print(
+                        f"Error reading audio {audio_path}: "
+                        f"soundfile={sf_err}; librosa={lb_err}; pydub={pd_err}"
+                    )
+                    return np.array([])
+
+    def _drain_previous_generation(self, timeout: float = 8.0) -> bool:
+        """Best-effort stop/join for any previous generation thread."""
+        thread = self.current_generation_thread
+        if thread is None:
+            return True
+        if not thread.is_alive():
+            self.current_generation_thread = None
+            return True
+
+        self.stop_generation = True
+        if self.current_streamer is not None:
+            try:
+                self.current_streamer.end()
+            except Exception:
+                pass
+
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            return False
+        self.current_generation_thread = None
+        return True
+
+    def _prepare_voice_conditioning_audio(self, wav: np.ndarray, target_sr: int = 24000) -> np.ndarray:
+        """Cap and re-sample long clone audio to reduce lexical leakage into generation."""
+        if wav is None:
+            return np.array([])
+        wav = np.asarray(wav, dtype=np.float32)
+        if wav.size == 0:
+            return wav
+
+        max_samples = int(self.max_clone_seconds * target_sr)
+        if wav.size <= max_samples:
+            return wav
+
+        working = wav
+        # Prefer voiced segments to keep timbre cues while reducing long-form lexical carry-over.
+        try:
+            intervals = librosa.effects.split(working, top_db=35)
+            if len(intervals) > 0:
+                voiced = np.concatenate([working[s:e] for s, e in intervals], axis=0)
+                if voiced.size >= int(max_samples * 0.6):
+                    working = voiced
+        except Exception:
+            pass
+
+        if working.size <= max_samples:
+            return working.astype(np.float32, copy=False)
+
+        segments = min(self.clone_segments, max_samples)
+        if segments <= 1:
+            start = max(0, (working.size - max_samples) // 2)
+            return working[start:start + max_samples].astype(np.float32, copy=False)
+
+        chunk_len = max(1, max_samples // segments)
+        max_start = max(0, working.size - chunk_len)
+        starts = np.linspace(0, max_start, num=segments, dtype=int)
+        chunks = [working[s:s + chunk_len] for s in starts]
+        condensed = np.concatenate(chunks, axis=0)
+        if condensed.size < max_samples:
+            condensed = np.pad(condensed, (0, max_samples - condensed.size))
+        return condensed[:max_samples].astype(np.float32, copy=False)
     
     def generate_podcast_streaming(self, 
                                  num_speakers: int,
@@ -298,12 +409,20 @@ class VibeVoiceDemo:
                                  speaker_2: str = None,
                                  speaker_3: str = None,
                                  speaker_4: str = None,
+                                 custom_voice_1: Any = None,
+                                 custom_voice_2: Any = None,
+                                 custom_voice_3: Any = None,
+                                 custom_voice_4: Any = None,
                                  cfg_scale: float = 1.3,
                                  inference_steps: Optional[int] = None,
                                  seed: Optional[int] = None,
                                  disable_voice_cloning: bool = False) -> Iterator[tuple]:
         try:
-            
+            # Ensure the previous request is fully drained before starting a new one.
+            if not self._drain_previous_generation(timeout=8.0):
+                self.is_generating = False
+                raise gr.Error("Error: previous generation is still shutting down. Please wait a few seconds and retry.")
+
             # Reset stop flag and set generating state
             self.stop_generation = False
             self.is_generating = True
@@ -323,11 +442,37 @@ class VibeVoiceDemo:
             # Collect selected speakers
             selected_speakers = [speaker_1, speaker_2, speaker_3, speaker_4][:num_speakers]
             
+            custom_voice_inputs = [custom_voice_1, custom_voice_2, custom_voice_3, custom_voice_4][:num_speakers]
+
+            def _resolve_uploaded_audio_path(value: Any) -> Optional[str]:
+                """Best-effort resolution for Gradio audio upload values."""
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    return value if os.path.isfile(value) else None
+                if isinstance(value, dict):
+                    for key in ("path", "name"):
+                        candidate = value.get(key)
+                        if isinstance(candidate, str) and os.path.isfile(candidate):
+                            return candidate
+                if isinstance(value, (list, tuple)):
+                    for item in value:
+                        if isinstance(item, str) and os.path.isfile(item):
+                            return item
+                return None
+
+            uploaded_voice_paths = [
+                _resolve_uploaded_audio_path(value) for value in custom_voice_inputs
+            ]
+
             # Validate speaker selections
             for i, speaker in enumerate(selected_speakers):
-                if not speaker or speaker not in self.available_voices:
+                has_uploaded_voice = bool(uploaded_voice_paths[i])
+                if (not speaker or speaker not in self.available_voices) and not has_uploaded_voice:
                     self.is_generating = False
-                    raise gr.Error(f"Error: Please select a valid speaker for Speaker {i+1}.")
+                    raise gr.Error(
+                        f"Error: Please select a valid preset voice or upload a custom voice for Speaker {i+1}."
+                    )
             
             voice_cloning_enabled = not disable_voice_cloning
 
@@ -364,6 +509,10 @@ class VibeVoiceDemo:
             log += f"📊 Parameters: CFG Scale={cfg_scale}, Inference Steps={resolved_inference_steps}, Seed={(resolved_seed if resolved_seed is not None else 'random')}\n"
             log += f"🎭 Speakers: {', '.join(selected_speakers)}\n"
             log += f"🔊 Voice cloning: {'Enabled' if voice_cloning_enabled else 'Disabled'}\n"
+            if voice_cloning_enabled:
+                upload_count = sum(1 for p in uploaded_voice_paths if p)
+                if upload_count > 0:
+                    log += f"📥 Custom voice uploads: {upload_count} active\n"
             if self.loaded_adapter_root:
                 log += f"🧩 LoRA: {self.loaded_adapter_root}\n"
             
@@ -377,12 +526,28 @@ class VibeVoiceDemo:
             voice_samples = None
             if voice_cloning_enabled:
                 voice_samples = []
-                for speaker_name in selected_speakers:
-                    audio_path = self.available_voices[speaker_name]
-                    audio_data = self.read_audio(audio_path)
+                for i, speaker_name in enumerate(selected_speakers):
+                    uploaded_path = uploaded_voice_paths[i] if i < len(uploaded_voice_paths) else None
+                    if uploaded_path:
+                        audio_data = self.read_audio(uploaded_path)
+                    else:
+                        audio_path = self.available_voices[speaker_name]
+                        audio_data = self.read_audio(audio_path)
                     if len(audio_data) == 0:
                         self.is_generating = False
-                        raise gr.Error(f"Error: Failed to load audio for {speaker_name}")
+                        source_name = uploaded_path if uploaded_path else speaker_name
+                        raise gr.Error(f"Error: Failed to load audio for {source_name}")
+                    original_samples = int(audio_data.shape[0])
+                    audio_data = self._prepare_voice_conditioning_audio(audio_data, target_sr=24000)
+                    if int(audio_data.shape[0]) < original_samples:
+                        original_sec = original_samples / 24000.0
+                        kept_sec = int(audio_data.shape[0]) / 24000.0
+                        source_name = uploaded_path if uploaded_path else speaker_name
+                        log += (
+                            f"✂️ Voice conditioning capped for {source_name}: "
+                            f"{original_sec:.1f}s -> {kept_sec:.1f}s "
+                            f"(set VIBEVOICE_MAX_CLONE_SECONDS to adjust)\n"
+                        )
                     voice_samples.append(audio_data)
             
             # log += f"✅ Loaded {len(voice_samples)} voice samples\n"
@@ -411,7 +576,21 @@ class VibeVoiceDemo:
                     formatted_script_lines.append(f"Speaker {speaker_id}: {line}")
             
             formatted_script = '\n'.join(formatted_script_lines)
+            text_token_count = len(
+                self.processor.tokenizer.encode(
+                    f" Text input:\n{formatted_script}\n",
+                    add_special_tokens=False,
+                )
+            )
+            voice_prompt_token_count = 0
+            if voice_samples:
+                ratio = max(1, int(getattr(self.processor, "speech_tok_compress_ratio", 3200)))
+                voice_prompt_token_count = int(sum((len(s) + ratio - 1) // ratio for s in voice_samples))
             log += f"📝 Formatted script with {len(formatted_script_lines)} turns\n\n"
+            log += (
+                f"🔢 Progress estimate basis: text_tokens={text_token_count}, "
+                f"voice_prompt_tokens={voice_prompt_token_count}\n"
+            )
             log += "🔄 Processing with VibeVoice (streaming mode)...\n"
             
             # Check for stop signal before processing
@@ -450,8 +629,20 @@ class VibeVoiceDemo:
             # Start generation in a separate thread
             generation_thread = threading.Thread(
                 target=self._generate_with_streamer,
-                args=(inputs, cfg_scale, audio_streamer, voice_cloning_enabled, resolved_inference_steps, resolved_seed, target_device)
+                args=(
+                    inputs,
+                    cfg_scale,
+                    audio_streamer,
+                    voice_cloning_enabled,
+                    resolved_inference_steps,
+                    resolved_seed,
+                    target_device,
+                    text_token_count,
+                    voice_prompt_token_count,
+                ),
+                daemon=True,
             )
+            self.current_generation_thread = generation_thread
             generation_thread.start()
             
             # Wait for generation to actually start producing audio
@@ -461,6 +652,8 @@ class VibeVoiceDemo:
             if self.stop_generation:
                 audio_streamer.end()
                 generation_thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to finish
+                if self.current_generation_thread is generation_thread and not generation_thread.is_alive():
+                    self.current_generation_thread = None
                 self.is_generating = False
                 yield None, "🛑 Generation stopped by user", gr.update(visible=False)
                 return
@@ -560,6 +753,8 @@ class VibeVoiceDemo:
 
             # Clean up
             self.current_streamer = None
+            if self.current_generation_thread is generation_thread and not generation_thread.is_alive():
+                self.current_generation_thread = None
             self.is_generating = False
             
             generation_time = time.time() - start_time
@@ -621,6 +816,8 @@ class VibeVoiceDemo:
             # Handle Gradio-specific errors (like input validation)
             self.is_generating = False
             self.current_streamer = None
+            if self.current_generation_thread is not None and not self.current_generation_thread.is_alive():
+                self.current_generation_thread = None
             error_msg = f"❌ Input Error: {str(e)}"
             print(error_msg)
             yield None, None, error_msg, gr.update(visible=False)
@@ -628,6 +825,8 @@ class VibeVoiceDemo:
         except Exception as e:
             self.is_generating = False
             self.current_streamer = None
+            if self.current_generation_thread is not None and not self.current_generation_thread.is_alive():
+                self.current_generation_thread = None
             error_msg = f"❌ An unexpected error occurred: {str(e)}"
             print(error_msg)
             import traceback
@@ -643,6 +842,8 @@ class VibeVoiceDemo:
         inference_steps: int,
         seed: Optional[int],
         target_device: str,
+        progress_text_tokens: Optional[int],
+        progress_voice_tokens: Optional[int],
     ):
         """Helper method to run generation with streamer in a separate thread."""
         try:
@@ -685,6 +886,8 @@ class VibeVoiceDemo:
                 audio_streamer=audio_streamer,
                 stop_check_fn=check_stop_generation,  # Pass the stop check function
                 verbose=False,  # Disable verbose in streaming mode
+                progress_text_tokens=progress_text_tokens,
+                progress_voice_tokens=progress_voice_tokens,
                 refresh_negative=self.refresh_negative,
                 is_prefill=voice_cloning_enabled,
             )
@@ -703,6 +906,10 @@ class VibeVoiceDemo:
                 self.current_streamer.end()
             except Exception as e:
                 print(f"Error stopping streamer: {e}")
+        if self.current_generation_thread is not None and self.current_generation_thread.is_alive():
+            self.current_generation_thread.join(timeout=2.0)
+            if not self.current_generation_thread.is_alive():
+                self.current_generation_thread = None
         print("🛑 Audio generation stop requested")
     
     def load_example_scripts(self):
@@ -824,10 +1031,33 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                         choices=available_speaker_names,
                         value=default_value,
                         label=f"Speaker {i+1}",
-                        visible=(i < 2),  # Initially show only first 2 speakers
+                        visible=(i < 1),  # Match default num_speakers=1
                         elem_classes="speaker-item"
                     )
                     speaker_selections.append(speaker)
+
+                gr.Markdown("### 🧬 **Voice Clone Upload (Optional)**")
+                custom_voice_uploads = []
+                for i in range(4):
+                    custom_voice = gr.Audio(
+                        label=f"Custom Voice {i+1} (optional)",
+                        type="filepath",
+                        format="wav",
+                        visible=(i < 1),
+                        elem_classes="speaker-item",
+                    )
+                    custom_voice_uploads.append(custom_voice)
+
+                gr.Markdown(
+                    """
+**Voice Clone Guide (Best Quality)**
+- Use one clean speaker only, 8-20 seconds.
+- No background music, no echo, no overlapping voices.
+- Speak naturally at normal speed and volume.
+- Include mixed sounds/words (short and long words, numbers, pauses).
+- WAV preferred; 16 kHz or 24 kHz mono gives stable results.
+                    """
+                )
                 
                 # Advanced settings
                 gr.Markdown("### ⚙️ **Advanced Settings**")
@@ -859,7 +1089,7 @@ def create_demo_interface(demo_instance: VibeVoiceDemo):
                     disable_voice_cloning = gr.Checkbox(
                         value=False,
                         label="Disable voice cloning (skip conditioning voice prompts)",
-                        info="When enabled, sets is_prefill=False so the model ignores provided speaker audio."
+                        info="When enabled, sets is_prefill=False so the model ignores provided speaker audio. This can increase style drift (including occasional background artifacts)."
                     )
                 
             # Right column - Generation
@@ -965,22 +1195,41 @@ Or paste text directly and it will auto-assign speakers.""",
                 )
         
         def update_speaker_visibility(num_speakers):
-            updates = []
+            speaker_updates = []
+            upload_updates = []
             for i in range(4):
-                updates.append(gr.update(visible=(i < num_speakers)))
-            return updates
+                visible = i < num_speakers
+                speaker_updates.append(gr.update(visible=visible))
+                upload_updates.append(gr.update(visible=visible))
+            return speaker_updates + upload_updates
         
         num_speakers.change(
             fn=update_speaker_visibility,
             inputs=[num_speakers],
-            outputs=speaker_selections
+            outputs=speaker_selections + custom_voice_uploads
         )
         
         # Main generation function with streaming
-        def generate_podcast_wrapper(num_speakers, script, speaker_1, speaker_2, speaker_3, speaker_4, cfg_scale, inference_steps, seed, disable_voice_cloning):
+        def generate_podcast_wrapper(
+            num_speakers,
+            script,
+            speaker_1,
+            speaker_2,
+            speaker_3,
+            speaker_4,
+            custom_voice_1,
+            custom_voice_2,
+            custom_voice_3,
+            custom_voice_4,
+            cfg_scale,
+            inference_steps,
+            seed,
+            disable_voice_cloning,
+        ):
             """Wrapper function to handle the streaming generation call."""
             try:
                 speakers = [speaker_1, speaker_2, speaker_3, speaker_4]
+                custom_voices = [custom_voice_1, custom_voice_2, custom_voice_3, custom_voice_4]
 
                 # Clear outputs and reset visibility at start
                 yield None, gr.update(value=None, visible=False), "🎙️ Starting generation...", gr.update(visible=True), gr.update(visible=False), gr.update(visible=True)
@@ -995,6 +1244,10 @@ Or paste text directly and it will auto-assign speakers.""",
                     speaker_2=speakers[1],
                     speaker_3=speakers[2],
                     speaker_4=speakers[3],
+                    custom_voice_1=custom_voices[0],
+                    custom_voice_2=custom_voices[1],
+                    custom_voice_3=custom_voices[2],
+                    custom_voice_4=custom_voices[3],
                     cfg_scale=cfg_scale,
                     inference_steps=inference_steps,
                     seed=seed,
@@ -1046,7 +1299,7 @@ Or paste text directly and it will auto-assign speakers.""",
             queue=False
         ).then(
             fn=generate_podcast_wrapper,
-            inputs=[num_speakers, script_input] + speaker_selections + [cfg_scale, inference_steps, seed, disable_voice_cloning],
+            inputs=[num_speakers, script_input] + speaker_selections + custom_voice_uploads + [cfg_scale, inference_steps, seed, disable_voice_cloning],
             outputs=[audio_output, complete_audio_output, log_output, streaming_status, generate_btn, stop_btn],
             queue=True  # Enable Gradio's built-in queue
         )
@@ -1104,6 +1357,7 @@ Or paste text directly and it will auto-assign speakers.""",
         ### 💡 **Usage Tips**
         
         - Click **🚀 Generate Podcast** to start audio generation
+        - Upload a short clean sample in **Voice Clone Upload** to clone your own voice
         - **Live Streaming** tab shows audio as it's generated (may have slight pauses)
         - **Complete Audio** tab provides the full, uninterrupted podcast after generation
         - During generation, you can click **🛑 Stop Generation** to interrupt the process

@@ -1,7 +1,7 @@
 # Rollback Guide
 
 This workspace is versioned with Git tags.  
-Release tag for this setup: `v0.1.0`.
+Release tag for this setup: `v0.2.0`.
 
 ## Check current version
 
@@ -17,7 +17,7 @@ Create a rollback branch from the release tag:
 
 ```bash
 cd /root/fish-speech/VibeVoice
-git switch -c rollback-v0.1.0 v0.1.0
+git switch -c rollback-v0.2.0 v0.2.0
 ```
 
 This keeps your current branch unchanged.
