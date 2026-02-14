@@ -1,4 +1,4 @@
-It's hard to imagine all code just finish by codex within 2 days, it fix aroud 100 conflict and error occur whole workflow. all the things I do is just vibing(vibing for coding)lol. and I don't believe any human engineer can finish these scripts and conlicts in 1 mouth without ai. you need read too much readme (totally 129,343,616 cached and output=298,488 (reasoning 163,994))
+It's hard to imagine all this code being finished by Codex in just two days; it fixed around 100 conflicts and errors across the workflow. All I did was vibe-coding (lol). I don't believe any human engineer could finish these scripts and conflicts in one month without AI, because you would need to read too much README content (totally 129,343,616 cached and output=298,488, with reasoning=163,994).
 # VibeVoice LAN Shell (Fork)
 
 GitHub-ready fork of Microsoft VibeVoice focused on practical local/LAN TTS usage with a stable WebUI workflow.
