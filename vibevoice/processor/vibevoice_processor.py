@@ -269,9 +269,6 @@ class VibeVoiceProcessor:
                 # Assume it's the script content directly
                 script = text
 
-        if script is not None:
-            script = verbalize_symbols(script)
-        
         if script is None:
             raise ValueError(f"Could not process input text: {text}")
         
@@ -621,7 +618,7 @@ class VibeVoiceProcessor:
             
             if match:
                 speaker_id = int(match.group(1))
-                text = ' ' + match.group(2).strip()
+                text = ' ' + verbalize_symbols(match.group(2)).strip()
                 parsed_lines.append((speaker_id, text))
                 speaker_ids.append(speaker_id)
             else:
