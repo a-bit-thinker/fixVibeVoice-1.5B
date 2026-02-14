@@ -82,6 +82,17 @@ class VoiceMapper:
         
         # Sort the voice presets alphabetically by name for better UI
         self.voice_presets = dict(sorted(self.voice_presets.items()))
+
+        # Exclude presets with background music by default (can mask as clone leakage).
+        if os.getenv("VIBEVOICE_INCLUDE_BGM_VOICES", "0") not in ("1", "true", "TRUE", "yes", "YES"):
+            before = len(self.voice_presets)
+            self.voice_presets = {
+                name: path for name, path in self.voice_presets.items()
+                if "_bgm" not in name.lower()
+            }
+            removed = before - len(self.voice_presets)
+            if removed > 0:
+                print(f"Filtered out {removed} *_bgm voice preset(s).")
         
         # Filter out voices that don't exist (this is now redundant but kept for safety)
         self.available_voices = {

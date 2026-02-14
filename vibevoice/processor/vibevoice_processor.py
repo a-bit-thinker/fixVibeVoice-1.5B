@@ -38,6 +38,9 @@ class VibeVoiceProcessor:
         self.speech_tok_compress_ratio = speech_tok_compress_ratio
         self.db_normalize = db_normalize
         self.audio_normalizer = AudioNormalizer() if db_normalize else None
+        # Keep conditioning snippets short and contiguous to reduce lexical leakage.
+        self.max_clone_seconds = max(3.0, float(os.getenv("VIBEVOICE_MAX_CLONE_SECONDS", "8")))
+        self.clone_fade_seconds = max(0.0, float(os.getenv("VIBEVOICE_CLONE_FADE_SECONDS", "0.02")))
         self.system_prompt = (
             " Transform the text into clean speech output from a single speaker, "
             "using one consistent voice style for the entire output.\n"
@@ -411,6 +414,51 @@ class VibeVoiceProcessor:
         
         return batch_encoding
 
+
+    def _prepare_voice_conditioning_audio(self, wav: np.ndarray, target_sr: int = 24000) -> np.ndarray:
+        """Cap clone audio to one contiguous high-energy/voiced window to reduce lexical carry-over."""
+        if wav is None:
+            return np.array([], dtype=np.float32)
+
+        wav = np.asarray(wav, dtype=np.float32)
+        if wav.size == 0:
+            return wav
+
+        max_samples = int(self.max_clone_seconds * target_sr)
+        if wav.size <= max_samples:
+            return wav.astype(np.float32, copy=False)
+
+        working = wav
+        try:
+            import librosa
+            intervals = librosa.effects.split(working, top_db=35)
+            if len(intervals) > 0:
+                voiced = np.concatenate([working[s:e] for s, e in intervals], axis=0)
+                if voiced.size >= int(max_samples * 0.6):
+                    working = voiced
+        except Exception:
+            pass
+
+        if working.size <= max_samples:
+            clipped = working.astype(np.float32, copy=False)
+        else:
+            window = max_samples
+            energy = np.square(working.astype(np.float64, copy=False))
+            cumsum = np.concatenate(([0.0], np.cumsum(energy)))
+            window_energy = cumsum[window:] - cumsum[:-window]
+            if window_energy.size > 0:
+                best_start = int(np.argmax(window_energy))
+            else:
+                best_start = max(0, (working.size - max_samples) // 2)
+            clipped = working[best_start:best_start + max_samples].astype(np.float32, copy=False)
+
+        fade = min(int(self.clone_fade_seconds * target_sr), clipped.size // 4)
+        if fade > 0:
+            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            clipped[:fade] *= ramp
+            clipped[-fade:] *= ramp[::-1]
+        return clipped
+
     def _create_voice_prompt(
         self, 
         speaker_samples: List[Union[str, np.ndarray]]
@@ -437,6 +485,8 @@ class VibeVoiceProcessor:
             else:
                 wav = np.array(speaker_audio, dtype=np.float32)
             
+            wav = self._prepare_voice_conditioning_audio(wav, target_sr=24000)
+
             # Apply normalization if needed
             if self.db_normalize and self.audio_normalizer:
                 wav = self.audio_normalizer(wav)

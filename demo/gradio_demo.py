@@ -72,8 +72,8 @@ class VibeVoiceDemo:
         self.tokenizer_path = tokenizer_path
         self.adapter_path = adapter_path
         self.exclude_bgm_voices = exclude_bgm_voices
-        self.max_clone_seconds = max(4.0, float(os.getenv("VIBEVOICE_MAX_CLONE_SECONDS", "30")))
-        self.clone_segments = max(1, int(os.getenv("VIBEVOICE_CLONE_SEGMENTS", "3")))
+        # Keep the clone reference short to preserve timbre while reducing lexical leakage.
+        self.max_clone_seconds = max(3.0, float(os.getenv("VIBEVOICE_MAX_CLONE_SECONDS", "8")))
         self.loaded_adapter_root: Optional[str] = None
         self.is_generating = False  # Track generation state
         self.stop_generation = False  # Flag to stop generation
@@ -363,7 +363,7 @@ class VibeVoiceDemo:
         return True
 
     def _prepare_voice_conditioning_audio(self, wav: np.ndarray, target_sr: int = 24000) -> np.ndarray:
-        """Cap and re-sample long clone audio to reduce lexical leakage into generation."""
+        """Cap long clone audio to a single contiguous segment to reduce lexical leakage."""
         if wav is None:
             return np.array([])
         wav = np.asarray(wav, dtype=np.float32)
@@ -388,19 +388,25 @@ class VibeVoiceDemo:
         if working.size <= max_samples:
             return working.astype(np.float32, copy=False)
 
-        segments = min(self.clone_segments, max_samples)
-        if segments <= 1:
-            start = max(0, (working.size - max_samples) // 2)
-            return working[start:start + max_samples].astype(np.float32, copy=False)
+        # Pick one contiguous high-energy window instead of stitching distant chunks.
+        # Stitching tends to inject lexical snippets from the reference at random places.
+        window = max_samples
+        energy = np.abs(working)
+        if energy.size > window:
+            kernel = np.ones(window, dtype=np.float32)
+            window_energy = np.convolve(energy, kernel, mode="valid")
+            start = int(np.argmax(window_energy))
+        else:
+            start = max(0, (working.size - window) // 2)
+        clipped = working[start:start + window].astype(np.float32, copy=False)
 
-        chunk_len = max(1, max_samples // segments)
-        max_start = max(0, working.size - chunk_len)
-        starts = np.linspace(0, max_start, num=segments, dtype=int)
-        chunks = [working[s:s + chunk_len] for s in starts]
-        condensed = np.concatenate(chunks, axis=0)
-        if condensed.size < max_samples:
-            condensed = np.pad(condensed, (0, max_samples - condensed.size))
-        return condensed[:max_samples].astype(np.float32, copy=False)
+        # Soft edges reduce abrupt consonant onsets from the reference clip.
+        fade = min(int(0.02 * target_sr), clipped.size // 4)
+        if fade > 0:
+            ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+            clipped[:fade] *= ramp
+            clipped[-fade:] *= ramp[::-1]
+        return clipped
     
     def generate_podcast_streaming(self, 
                                  num_speakers: int,
