@@ -10,6 +10,7 @@ import torch
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
 from transformers.utils import TensorType, logging
 from .vibevoice_tokenizer_processor import AudioNormalizer
+from .text_normalizer import verbalize_symbols
 
 logger = logging.get_logger(__name__)
 
@@ -216,7 +217,8 @@ class VibeVoiceStreamingProcessor:
         # Process each input
         all_encodings = []
         for text_input, cached_prompt_input in zip(texts, cached_prompts):
-            script_tokens = self.tokenizer.encode(text_input.strip() + "\n", add_special_tokens=False)
+            normalized_text = verbalize_symbols(text_input)
+            script_tokens = self.tokenizer.encode(normalized_text.strip() + "\n", add_special_tokens=False)
             input_id_length = cached_prompt_input['lm']['last_hidden_state'].size(1)
             tts_lm_input_id_length = cached_prompt_input['tts_lm']['last_hidden_state'].size(1)
 
