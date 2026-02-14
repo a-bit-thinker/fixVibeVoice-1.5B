@@ -10,6 +10,7 @@ import torch
 from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
 from transformers.utils import TensorType, logging
 from .vibevoice_tokenizer_processor import AudioNormalizer
+from .text_normalizer import verbalize_symbols
 
 logger = logging.get_logger(__name__)
 
@@ -270,7 +271,7 @@ class VibeVoiceProcessor:
             else:
                 # Assume it's the script content directly
                 script = text
-        
+
         if script is None:
             raise ValueError(f"Could not process input text: {text}")
         
@@ -604,7 +605,7 @@ class VibeVoiceProcessor:
                 continue
             
             # Clean up text
-            text = text.strip()
+            text = verbalize_symbols(text).strip()
             if text:
                 script_lines.append(f"Speaker {speaker_id}: {text}")
         
@@ -639,12 +640,12 @@ class VibeVoiceProcessor:
             
             if speaker_match:
                 speaker_id = int(speaker_match.group(1))
-                text = speaker_match.group(2).strip()
+                text = verbalize_symbols(speaker_match.group(2)).strip()
                 if text:
                     script_lines.append(f"Speaker {speaker_id}: {text}")
             else:
                 # Treat as plain text - assign to current speaker
-                script_lines.append(f"Speaker {current_speaker}: {line}")
+                script_lines.append(f"Speaker {current_speaker}: {verbalize_symbols(line)}")
         
         if not script_lines:
             raise ValueError("No valid content found in text file")
@@ -667,7 +668,7 @@ class VibeVoiceProcessor:
             
             if match:
                 speaker_id = int(match.group(1))
-                text = ' ' + match.group(2).strip()
+                text = ' ' + verbalize_symbols(match.group(2)).strip()
                 parsed_lines.append((speaker_id, text))
                 speaker_ids.append(speaker_id)
             else:
